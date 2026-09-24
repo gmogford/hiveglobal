@@ -1,0 +1,30 @@
+{
+  "_doc": "Hard limits + policy thresholds. Editing this file changes the bundle hash; the loop will refuse to start until the change is re-approved (scripts/approve.py). Absolute ceilings live in hive_trader/config.py.",
+  "risk": {
+    "max_drawdown": 0.10,
+    "max_daily_loss": 0.02,
+    "max_position_frac": 0.10,
+    "max_gross_frac": 0.30,
+    "max_risk_per_trade": 0.005,
+    "max_leverage": 1.0,
+    "max_orders_per_minute": 6,
+    "max_snapshot_age_ms": 2000,
+    "max_jev_latency_ms": 1500,
+    "near_limit_ratio": 0.6,
+    "reduce_ratio": 0.85
+  },
+  "policy": {
+    "min_setup_quality": 2,
+    "min_direction_p": 0.80,
+    "escalate_confidence_below": 0.60,
+    "max_toxic_flow_p": 0.50,
+    "kelly_fraction": 0.25,
+    "stop_sigma": 1.0,
+    "take_sigma": 1.5,
+    "min_edge_over_cost": 1.5,
+    "taker_fee_bps": 4.5,
+    "expected_slippage_bps": 3.0,
+    "candle_ms": 300000,
+    "horizon_candles": 12
+  }
+}

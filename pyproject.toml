@@ -1,0 +1,12 @@
+[project]
+name = "hive-trader"
+version = "0.1.0"
+description = "Autonomous crypto trading agent: deterministic state engine + Jev reflex + hard risk layer"
+requires-python = ">=3.11"
+dependencies = []  # core is stdlib-only on purpose: fewer moving parts in the hot path
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
