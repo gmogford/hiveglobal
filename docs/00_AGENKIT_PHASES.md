@@ -29,7 +29,7 @@ tool-agnostic.
 | **G0 Spec** | Every market claim in `docs/research/` has a date and a source link, and every estimate/speculation is labelled | ✅ delivered, operator to sign |
 | **G1 Architecture** | No code path lets a model output set a size, a limit, or place an order. Verified by `grep`: `hive_trader/jev/` imports nothing from `risk`, `execution`, `loop` | ✅ |
 | **G2 Test plan** | Each hard limit, gate, causality rule, and the approval lock has at least one named test in `docs/03_TEST_PLAN.md` | ✅ |
-| **G3 Implementation** | `python -m pytest` reports 0 failures (44 passed at commit time) | ✅ |
+| **G3 Implementation** | `python -m pytest` reports 0 failures (54 passed at commit time) | ✅ |
 | **G4 Paper approval** | `scripts/approve.py --mode paper` succeeds: named human approver, `tests_passed=true`. The loop refuses to start without this lock | ⏳ operator |
 | **G5 Live data + venue** | Live data adapter + live venue adapter, testnet orders round-trip, reconciliation of positions vs venue = 0 diffs over 24h | ⏳ not built |
 | **G6 Live approval** | `scripts/approve.py --mode live` accepts the evidence: ≥14 paper days, ≥500 non-overlapping scored outcomes, out-of-sample Brier skill ≥ 0.02 (on that subsample), Jev p95 latency ≤ 1500 ms, net paper PnL after pessimistic costs > 0, paper max drawdown ≤ 5%, fitted + reviewed calibration map | ⏳ blocked on G5 + data |

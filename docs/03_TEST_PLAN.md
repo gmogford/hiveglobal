@@ -21,6 +21,7 @@ Run: `python -m pytest -q`. Everything runs offline; the network is not needed.
 | Config ceilings cannot be exceeded, limits immutable | `test_config_ceilings_block_dangerous_values` |
 | Kill switch fails closed; checked before every entry; exits still allowed | `test_risk::test_killswitch_fail_closed`, `test_killswitch_checked_before_every_entry`, `test_exits_allowed_when_tripped` |
 | Drawdown → trip + flatten; daily loss → halt until next day | `test_drawdown_trips_killswitch_and_flattens`, `test_daily_loss_halts_entries_until_next_day` |
+| Restart never resets the book: drawdown/HWM, positions + stops, daily halt, order-rate window survive; unreadable state fails closed; `build_loop` restores and logs it | `test_risk_state::test_restart_keeps_drawdown_hwm_and_positions`, `test_restart_keeps_daily_halt_until_next_utc_day`, `test_restart_keeps_order_rate_window`, `test_unreadable_state_fails_closed`, `test_build_loop_restores_and_logs_it` |
 | Stops, rate limit, fat-finger | `test_stop_triggers_exit`, `test_rate_limit_and_fat_finger` |
 | End-to-end loop logs every decision; gross cap holds; forbidden direction never fires | `test_loop_and_review::test_end_to_end_paper_loop_logs_every_decision` |
 | Escalation freezes symbol | `test_escalation_freezes_symbol_until_cleared` |

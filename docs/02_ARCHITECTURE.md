@@ -31,6 +31,7 @@
 | Every number comes from code | `state_engine.py` computes mid, spread, imbalance, microprice, depth, returns, realized vol, flow, inventory, drawdown |
 | No future data | `Snapshot.__post_init__` + `StateEngine.snapshot` raise `CausalityError` |
 | Kill switch before every order | `RiskManager.pre_trade_check` step 1. It fails closed if the file is missing or malformed |
+| A restart never resets the book | `RiskManager` writes `runtime/<mode>/risk_state.json` atomically on every fill, new HWM, day roll, halt, trip and accepted order, and reloads it at startup (saved equity wins over `--equity`). An unreadable file raises `RiskStateError`: the loop refuses to start rather than begin from a clean slate |
 | No unreviewed live change | `review/gate.verify` at startup: bundle hash must equal the human-signed lock |
 
 ## Jev integration (verified, not assumed)

@@ -37,7 +37,7 @@ scripts/            run_paper, nightly_review, approve, clear_escalation, killsw
 
 ## Run
 ```bash
-python -m pytest -q                                   # 44 tests, offline
+python -m pytest -q                                   # 54 tests, offline
 python scripts/run_paper.py --hours 24 --skip-gate    # synthetic feed, MockJev (no edge by construction)
 python scripts/nightly_review.py --date 2026-09-24    # report + proposal under runtime/reviews/
 python scripts/approve.py --mode paper --approver "<your name>" --evidence evidence.json   # G4

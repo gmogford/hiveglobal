@@ -7,9 +7,10 @@ entries and exits alike, and the kill switch is consulted first, every time.
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .config import RiskLimits
@@ -65,12 +66,20 @@ class Position:
     take_px: float | None = None
 
 
+class RiskStateError(RuntimeError):
+    """Saved risk state exists but cannot be trusted. The loop must not start on a reset state."""
+
+
+STATE_VERSION = 1
+
+
 @dataclass
 class RiskManager:
     limits: RiskLimits
     kill: KillSwitch
     start_equity: float
     per_symbol_cap: dict[str, float] = field(default_factory=dict)  # tighter finalist caps
+    state_path: Path | None = None   # set => state survives restarts; None => in-memory only (tests, sims)
 
     def __post_init__(self) -> None:
         self.cash = self.start_equity
@@ -82,6 +91,54 @@ class RiskManager:
         self.day_halted = False
         self._order_ts: deque[int] = deque()
         self.fees_paid = 0.0
+        self.restored = False
+        if self.state_path is not None:
+            self.state_path = Path(self.state_path)
+            if self.state_path.exists():
+                self._load()
+                self.restored = True
+            else:
+                self.save()
+
+    # ------------------------------------------------------------ persistence
+    # A restart must never reset drawdown, the daily loss, or open positions. Every change to
+    # cash, positions, HWM, the day boundary or the halt flag is written before the next event
+    # is processed. A state file that exists but cannot be read is fatal (fail closed), never
+    # silently replaced with a fresh one: that would hand a losing book a clean slate.
+    def save(self) -> None:
+        if self.state_path is None:
+            return
+        st = {"version": STATE_VERSION, "start_equity": self.start_equity, "cash": self.cash,
+              "positions": {s: asdict(p) for s, p in self.positions.items()}, "marks": self.marks,
+              "hwm": self.hwm, "day": self.day, "day_start_equity": self.day_start_equity,
+              "day_halted": self.day_halted, "order_ts": list(self._order_ts), "fees_paid": self.fees_paid,
+              "saved_at": int(time.time() * 1000)}
+        tmp = self.state_path.with_suffix(".tmp")
+        with tmp.open("w") as fh:
+            json.dump(st, fh, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, self.state_path)          # atomic: a crash mid-write leaves the old file
+
+    def _load(self) -> None:
+        try:
+            st = json.loads(self.state_path.read_text())
+            if st.get("version") != STATE_VERSION:
+                raise ValueError(f"unsupported state version {st.get('version')!r}")
+            self.start_equity = float(st["start_equity"])
+            self.cash = float(st["cash"])
+            self.positions = {s: Position(**p) for s, p in st["positions"].items()}
+            self.marks = {s: float(v) for s, v in st["marks"].items()}
+            self.hwm = float(st["hwm"])
+            self.day = st["day"]
+            self.day_start_equity = float(st["day_start_equity"])
+            self.day_halted = bool(st["day_halted"])
+            self._order_ts = deque(int(t) for t in st["order_ts"])
+            self.fees_paid = float(st["fees_paid"])
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            raise RiskStateError(f"risk state {self.state_path} unreadable ({type(e).__name__}: {e}); "
+                                 "refusing to start on a reset state. Inspect it; delete it only to "
+                                 "deliberately start a fresh book.") from e
 
     # ------------------------------------------------------------ accounting
     def equity(self) -> float:
@@ -110,19 +167,24 @@ class RiskManager:
             self.day = d
             self.day_start_equity = self.equity()
             self.day_halted = False
+            self.save()
 
     def on_mark(self, symbol: str, px: float, ts: int) -> list[Order]:
         """Update mark; enforce drawdown/daily-loss; return protective exit orders."""
         self.marks[symbol] = px
         self.roll_day(ts)
         eq = self.equity()
-        self.hwm = max(self.hwm, eq)
+        if eq > self.hwm:
+            self.hwm = eq
+            self.save()
         exits: list[Order] = []
         if self.drawdown() >= self.limits.max_drawdown:
             self.kill.trip(f"max drawdown {self.drawdown():.2%} >= {self.limits.max_drawdown:.0%}")
+            self.save()
             return self.flatten_all(ts, "max_drawdown")
-        if self.daily_pnl_frac() <= -self.limits.max_daily_loss:
+        if self.daily_pnl_frac() <= -self.limits.max_daily_loss and not self.day_halted:
             self.day_halted = True
+            self.save()
         p = self.positions.get(symbol)
         if p and p.qty != 0:
             hit_stop = p.stop_px is not None and ((p.qty > 0 and px <= p.stop_px) or (p.qty < 0 and px >= p.stop_px))
@@ -159,6 +221,7 @@ class RiskManager:
         if p.qty == 0:
             p.avg_px, p.stop_px, p.take_px = 0.0, None, None
         self.marks.setdefault(f.symbol, f.px)
+        self.save()
 
     # ------------------------------------------------------------ gatekeeping
     def code_risk_state(self, symbol: str) -> str:
@@ -214,4 +277,5 @@ class RiskManager:
             reasons.append("order rate limit")
         if not reasons:
             self._order_ts.append(now_ms)
+            self.save()
         return (not reasons), reasons

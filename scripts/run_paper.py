@@ -25,6 +25,9 @@ ap.add_argument("--skip-gate", action="store_true", help="dev only; never for li
 a = ap.parse_args()
 
 loop = build_loop("paper", Path(a.runtime), a.equity, a.jev, skip_gate=a.skip_gate)
+if loop.risk.restored:
+    print(f"resumed saved book: equity {loop.risk.equity():.2f}, drawdown {loop.risk.drawdown():.2%} "
+          f"(--equity ignored; delete {Path(a.runtime) / 'risk_state.json'} to start fresh)")
 start = 1_790_000_000_000
 minutes = int(a.hours * 60)
 streams = [synthetic_events(f.symbol, start, minutes, START_MIDS.get(f.symbol, 100.0), seed=i)

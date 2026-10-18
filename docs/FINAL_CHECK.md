@@ -77,7 +77,9 @@ Ordered by how likely each is to cost money.
     discarded as late, and the system will (correctly) do nothing.
 11. **Process risk.** An escalation freezes a symbol until the brain clears it, with no timeout. That is
     deliberately fail-safe, but if nobody is watching it can freeze indefinitely. Likewise, an in-memory
-    kill-switch trip needs a process restart after re-arming.
+    kill-switch trip needs a process restart after re-arming. Risk state (equity, HWM, positions, daily halt)
+    is saved to disk, so a restart resumes the same book instead of resetting the drawdown and daily-loss limits.
+    It is a paper book: on live, the venue is the source of truth and G5 reconciliation must override it.
 12. **AgenKit was not actually run.** The phase gates follow its structure by hand. If the real tool's
     workflow differs, re-drive the build through `/agenkit` and reconcile.
 
