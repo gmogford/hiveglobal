@@ -1,0 +1,1111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src blob: data:; media-src blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'">
+<link rel="icon" href="data:,">
+<title>Photo Sorter</title>
+<!--
+================================================================================
+ PHOTO SORTER — SAFETY RULES (these are enforced by the code below)
+================================================================================
+ 0. Runs entirely offline. The CSP above blocks every network request
+    (connect-src 'none', no external scripts, fonts or images). Photos never
+    leave this machine.
+ 1. Folder access
+    - showDirectoryPicker({mode:'read'}) first. Write access is requested only
+      when you press Copy/Move (or Undo).            -> chooseFolder, ensureWritePermission
+    - Only files DIRECTLY in the chosen folder are read; subfolders are never
+      entered.                                       -> listTopLevel
+    - Hidden/system files and the app's own log files are ignored. -> isIgnored
+ 2. Dangerous folders are refused before any file is read: Photos/iPhoto/
+    Aperture library packages, the inside of a library, and broad folders
+    (Pictures, Desktop, Documents, Downloads, home).  -> checkFolderSafety
+ 3. A full "file -> folder" plan is shown before anything is written; Copy is
+    the default.                                    -> openPlanDialog
+ 4. Never delete, never overwrite
+    - Every destination name is checked right before use; taken names get
+      " (1)", " (2)"...                              -> freeName, nameTaken
+    - createWritable() is only ever called on a file this run just created
+      (and that is still 0 bytes), or on this run's own log file. -> copyInto, makeLogWriter
+    - Move uses FileSystemHandle.move() only; it is never emulated with
+      copy + delete. No move() support = Move button disabled. -> SUPPORTS_MOVE
+    - removeEntry() is only called on: a half-written copy from this run, a
+      copy being undone (after checking the original is still there with the
+      same size), or an EMPTY category folder this app created. It is never
+      called with options, so it can never delete a folder's contents.
+                                                     -> copyInto, undoRun
+    - One file at a time, with Stop.                 -> runOrganise
+ 5. A JSON log is written into the folder before the first operation and kept
+    up to date; Undo works from it even after closing the tab. -> runOrganise, undoRun
+ 6. Any error stops the run, names the file, and leaves the log accurate.
+================================================================================
+-->
+<style>
+  :root{
+    --page:#ebe8e3; --win:#fbfaf8; --ink:#1f1d1a; --muted:#77716a; --line:#e3dfd8;
+    --card:#ffffff; --accent:#2f6db3; --accent-ink:#ffffff; --warn:#a4481f; --warn-bg:#fbefe8;
+    --ok:#2f7a4a;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{background:var(--page);color:var(--ink);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;min-height:100vh;padding:28px 16px}
+  button{font:inherit}
+  .window{max-width:1180px;margin:0 auto;background:var(--win);border-radius:14px;box-shadow:0 1px 2px rgba(0,0,0,.06),0 18px 50px rgba(40,30,20,.12);overflow:hidden}
+  .titlebar{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line)}
+  .dot{width:12px;height:12px;border-radius:50%;background:#e2ddd6}
+  .titlebar .app{margin-left:8px;color:var(--muted);font-size:12px;letter-spacing:.02em}
+  header{padding:22px 26px 6px}
+  h1{font-weight:600;font-size:28px;margin:0 0 4px;letter-spacing:-.01em}
+  h1 em{font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;font-style:italic;font-weight:500}
+  .sub{color:var(--muted);margin:0}
+  .toolbar{display:flex;flex-wrap:wrap;gap:8px;padding:14px 26px}
+  .btn{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:8px;padding:7px 14px;cursor:pointer}
+  .btn:hover:not(:disabled){border-color:#cfc9c0}
+  .btn:disabled{opacity:.45;cursor:default}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+  .btn.danger{color:var(--warn)}
+  .banner{margin:0 26px 10px;padding:10px 14px;border-radius:8px;background:var(--warn-bg);color:var(--warn);display:none;gap:12px;align-items:center;flex-wrap:wrap}
+  .banner.show{display:flex}
+  .banner.info{background:#eaf1fa;color:#204f86}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:4px 26px 16px}
+  .stat{background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px 14px}
+  .stat b{display:block;font-size:24px;font-weight:600;font-variant-numeric:tabular-nums}
+  .stat span{color:var(--muted);font-size:12px}
+  .main{display:grid;grid-template-columns:240px 1fr 240px;gap:16px;padding:0 26px 26px}
+  .col h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:6px 0 8px;font-weight:600}
+  .col h2.gap{margin-top:18px}
+  .card{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:8px;transform-origin:50% 50%}
+  .card canvas{width:44px;height:44px;border-radius:6px;background:#f1eee9;flex:none}
+  .card .lbl{flex:1;min-width:0}
+  .card .name{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .card .swatch{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:1px}
+  .card .count{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums;min-width:2ch;text-align:right}
+  .stage{position:relative;min-height:520px;border-radius:12px;background:radial-gradient(ellipse at 50% 45%,#fff 0%,#f4f1ec 70%);border:1px solid var(--line);overflow:hidden}
+  .overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px;gap:10px}
+  .overlay[hidden]{display:none}
+  .overlay p{margin:0;color:var(--muted);max-width:380px}
+  .overlay .big{font-size:16px;color:var(--ink)}
+  .bar{width:min(320px,80%);height:6px;border-radius:3px;background:#e6e2db;overflow:hidden}
+  .bar i{display:block;height:100%;width:0;background:var(--accent);transform-origin:0 50%}
+  .hint{position:absolute;left:0;right:0;bottom:12px;text-align:center;color:var(--muted);font-size:12px;pointer-events:none}
+  kbd{font:inherit;font-size:11px;border:1px solid #d6d0c7;border-bottom-width:2px;border-radius:4px;padding:0 5px;background:#fff;color:var(--ink)}
+  #fly{position:fixed;inset:0;pointer-events:none;z-index:50;overflow:hidden}
+  .pol{position:absolute;left:0;top:0;background:#fff;padding:3px 3px 10px;border-radius:2px;box-shadow:0 1px 2px rgba(0,0,0,.25),0 4px 10px rgba(0,0,0,.10);will-change:transform}
+  .pol canvas{display:block;width:var(--pw,56px);height:auto;background:#ddd}
+  dialog{border:none;border-radius:14px;padding:0;max-width:min(640px,calc(100vw - 32px));width:640px;box-shadow:0 20px 60px rgba(0,0,0,.25);color:var(--ink)}
+  dialog::backdrop{background:rgba(30,25,20,.35)}
+  .dlg{padding:22px 24px}
+  .dlg h3{margin:0 0 6px;font-size:20px}
+  .dlg p{margin:6px 0;color:#4d4842}
+  .dlg .small{font-size:12px;color:var(--muted)}
+  .plan{max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:8px;margin:12px 0;font-size:13px}
+  .plan div{display:flex;gap:8px;padding:5px 10px;border-bottom:1px solid #f0ede8}
+  .plan div:last-child{border-bottom:none}
+  .plan .f{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .plan .to{color:var(--muted);white-space:nowrap}
+  .plan .note{color:var(--warn);font-size:12px;white-space:nowrap}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+  .chip{background:#f3f0eb;border-radius:999px;padding:2px 10px;font-size:12px}
+  .actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px;flex-wrap:wrap}
+  .list{max-height:200px;overflow:auto;font-size:12px;color:#4d4842;margin:8px 0;padding-left:18px}
+  .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#1f1d1a;color:#fff;padding:10px 16px;border-radius:8px;z-index:100;max-width:calc(100vw - 32px);display:none}
+  .toast.show{display:block}
+  @media (max-width:900px){
+    .main{grid-template-columns:1fr}
+    .stage{order:-1;min-height:420px}
+    .stats{grid-template-columns:repeat(2,1fr)}
+    header,.toolbar{padding-left:16px;padding-right:16px}
+    .main,.stats{padding-left:16px;padding-right:16px}
+    .banner{margin-left:16px;margin-right:16px}
+  }
+</style>
+</head>
+<body>
+<div class="window">
+  <div class="titlebar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="app">Photo Sorter</span></div>
+  <header>
+    <h1>Sorting my <em id="folderName">photos</em> folder</h1>
+    <p class="sub" id="subtitle">Works offline. Nothing is uploaded, deleted or overwritten.</p>
+  </header>
+  <div class="toolbar">
+    <button class="btn" id="btnChoose">Choose folder</button>
+    <button class="btn" id="btnDemo">Demo</button>
+    <button class="btn" id="btnReplay" disabled>Replay</button>
+    <button class="btn primary" id="btnSort" disabled>Sort</button>
+    <button class="btn danger" id="btnUndo" disabled>Undo</button>
+  </div>
+  <div class="banner" id="banner"><span id="bannerText"></span><button class="btn" id="bannerBtn" hidden></button></div>
+  <div class="stats">
+    <div class="stat"><b id="stTotal">0</b><span>Total files</span></div>
+    <div class="stat"><b id="stPhotos">0</b><span>Photos</span></div>
+    <div class="stat"><b id="stVideos">0</b><span>Videos</span></div>
+    <div class="stat"><b id="stDups">0</b><span>Duplicates</span></div>
+  </div>
+  <div class="main">
+    <div class="col" id="colLeft"><h2>Photos</h2></div>
+    <div class="stage" id="stage">
+      <div class="overlay" id="ovEmpty">
+        <p class="big">Choose a folder of exported photos, or try the Demo.</p>
+        <p>Use a folder you exported from Photos (File → Export), never the Photos Library itself. Only files directly inside the folder are sorted.</p>
+      </div>
+      <div class="overlay" id="ovScan" hidden>
+        <p class="big" id="scanText">Scanning…</p>
+        <div class="bar"><i id="scanBar"></i></div>
+        <p id="scanSub"></p>
+        <button class="btn" id="btnCancelScan">Cancel</button>
+      </div>
+      <div class="overlay" id="ovDone" hidden>
+        <p class="big" id="doneText"></p>
+        <p id="doneSub"></p>
+      </div>
+      <div class="hint" id="hint" hidden><kbd>Space</kbd> sort · <kbd>R</kbd> replay</div>
+    </div>
+    <div class="col" id="colRight"><h2>Videos</h2></div>
+  </div>
+</div>
+<div id="fly"></div>
+<div class="toast" id="toast"></div>
+
+<dialog id="dlgPlan"><div class="dlg">
+  <h3 id="planTitle">Organise files?</h3>
+  <p id="planIntro"></p>
+  <div class="chips" id="planChips"></div>
+  <div class="plan" id="planList"></div>
+  <p id="planSize"></p>
+  <p class="small" id="planMove"></p>
+  <p class="small">Nothing is deleted or overwritten. A log file is saved in the folder so Undo works even after you close this tab.</p>
+  <div class="actions">
+    <button class="btn" id="planCancel">Cancel</button>
+    <button class="btn" id="planMoveBtn">Move</button>
+    <button class="btn primary" id="planCopyBtn" autofocus>Copy</button>
+  </div>
+</div></dialog>
+
+<dialog id="dlgProgress"><div class="dlg">
+  <h3 id="progTitle">Working…</h3>
+  <div class="bar" style="width:100%;margin:12px 0"><i id="progBar"></i></div>
+  <p class="small" id="progFile"></p>
+  <div class="actions"><button class="btn" id="progStop">Stop</button></div>
+</div></dialog>
+
+<dialog id="dlgMsg"><div class="dlg">
+  <h3 id="msgTitle"></h3>
+  <div id="msgBody"></div>
+  <div class="actions"><button class="btn primary" id="msgOk">OK</button></div>
+</div></dialog>
+
+<script>
+'use strict';
+
+/* ---------------------------------------------------------------------------
+   Constants
+--------------------------------------------------------------------------- */
+const CATS = {
+  screenshots:{label:'Screenshots',      folder:'Screenshots',             group:'photo',   color:'#9aa4b2'},
+  night:      {label:'Night & moody',    folder:'Night & moody',           group:'photo',   color:'#2b2f4a'},
+  golden:     {label:'Golden hour',      folder:'Golden hour',             group:'photo',   color:'#e8a24a'},
+  sky:        {label:'Sky & sea',        folder:'Sky & sea',               group:'photo',   color:'#4a90d9'},
+  portrait:   {label:'Portrait shots',   folder:'Portrait shots',          group:'photo',   color:'#c98b9a'},
+  everyday:   {label:'Everyday shots',   folder:'Everyday shots',          group:'photo',   color:'#7fa37a'},
+  quick:      {label:'Quick clips <10s', folder:'Quick clips (under 10s)', group:'video',   color:'#d9645a'},
+  broll:      {label:'B-roll 10–60s',    folder:'B-roll (10-60s)',         group:'video',   color:'#8a6bd1'},
+  long:       {label:'Long takes 60s+',  folder:'Long takes (60s+)',       group:'video',   color:'#3c8d8a'},
+  dup:        {label:'Duplicates',       folder:'Duplicates',              group:'cleanup', color:'#b0a89c'},
+  docs:       {label:'Docs & other',     folder:'Docs & other',            group:'cleanup', color:'#c7b98f'},
+};
+const CAT_KEYS = Object.keys(CATS);
+const FOLDER_NAMES = new Set(CAT_KEYS.map(k => CATS[k].folder));
+
+const IMAGE_EXT = new Set(['jpg','jpeg','png','gif','webp','avif','bmp','heic','heif','tif','tiff','dng','cr2','cr3','nef','arw','raf','orf','rw2']);
+const VIDEO_EXT = new Set(['mp4','mov','m4v','webm','avi','mkv','3gp','mts','m2ts']);
+const MAX_SPRITES = 300;
+const MAX_HASH_BYTES = 1024 * 1024 * 1024; // 1 GB
+const SCAN_CONCURRENCY = 4;
+const LOG_RE = /^photo-sorter-log-(.+)\.json$/;
+const UNDO_RE = /^photo-sorter-undo-(.+)\.json$/;
+
+// Common phone / desktop screen sizes (either orientation) used to spot screenshots.
+const SCREEN_SIZES = [
+  [640,1136],[750,1334],[828,1792],[1080,1920],[1080,2340],[1080,2400],[1125,2436],[1170,2532],
+  [1179,2556],[1206,2622],[1242,2208],[1242,2688],[1284,2778],[1290,2796],[1320,2868],[1440,3200],
+  [1366,768],[1440,900],[1536,864],[1680,1050],[1920,1080],[1920,1200],[2560,1440],[2560,1600],
+  [2560,1664],[2880,1800],[2940,1912],[3024,1964],[3456,2234],[3840,2160],[5120,2880],
+];
+
+const HAS_PICKER = typeof window.showDirectoryPicker === 'function';
+// Move is only offered when the browser has a real move(); it is never emulated.
+const SUPPORTS_MOVE = typeof FileSystemFileHandle !== 'undefined' &&
+                      typeof FileSystemFileHandle.prototype.move === 'function';
+
+/* ---------------------------------------------------------------------------
+   State
+--------------------------------------------------------------------------- */
+const S = {
+  source: null,        // 'demo' | 'folder'
+  root: null,          // FileSystemDirectoryHandle (folder mode)
+  items: [],
+  scanToken: null,
+  organised: false,
+  busy: false,         // organising / undoing
+  lastRun: null,       // {root, log, logName}
+};
+
+/* ---------------------------------------------------------------------------
+   Small helpers (all user-supplied text goes through textContent)
+--------------------------------------------------------------------------- */
+const $ = id => document.getElementById(id);
+function el(tag, props, ...kids){
+  const n = document.createElement(tag);
+  if (props) for (const [k,v] of Object.entries(props)){
+    if (k === 'class') n.className = v; else if (k === 'text') n.textContent = v; else n.setAttribute(k, v);
+  }
+  for (const k of kids) if (k != null) n.append(k);  // append() of a string creates a text node
+  return n;
+}
+const extOf = name => { const i = name.lastIndexOf('.'); return i > 0 ? name.slice(i+1).toLowerCase() : ''; };
+function splitName(name){ const i = name.lastIndexOf('.'); return i > 0 ? [name.slice(0,i), name.slice(i)] : [name, '']; }
+function fmtBytes(n){
+  if (n < 1024) return n + ' B';
+  const u = ['KB','MB','GB','TB']; let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < u.length-1);
+  return n.toFixed(n < 10 ? 1 : 0) + ' ' + u[i];
+}
+function stamp(d){ const p = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`; }
+let toastTimer = 0;
+function toast(msg, ms = 3500){ const t = $('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), ms); }
+function banner(text, kind = 'warn', btnLabel = null, onClick = null){
+  const b = $('banner'), bt = $('bannerBtn');
+  if (!text){ b.classList.remove('show'); return; }
+  b.classList.toggle('info', kind === 'info');
+  $('bannerText').textContent = text;
+  bt.hidden = !btnLabel;
+  if (btnLabel){ bt.textContent = btnLabel; bt.onclick = onClick; }
+  b.classList.add('show');
+}
+function showMessage(title, lines, list){
+  $('msgTitle').textContent = title;
+  const body = $('msgBody'); body.replaceChildren();
+  for (const l of [].concat(lines || [])) body.append(el('p', {text:l}));
+  if (list && list.length){
+    const ul = el('ul', {class:'list'});
+    for (const li of list.slice(0, 500)) ul.append(el('li', {text:li}));
+    if (list.length > 500) ul.append(el('li', {text:`…and ${list.length-500} more`}));
+    body.append(ul);
+  }
+  const d = $('dlgMsg');
+  return new Promise(res => { $('msgOk').onclick = () => { d.close(); res(); }; d.onclose = () => res(); d.showModal(); });
+}
+function isIgnored(name){
+  return name.startsWith('.') || /^(thumbs\.db|desktop\.ini|icon\r?)$/i.test(name) ||
+         LOG_RE.test(name) || UNDO_RE.test(name);
+}
+
+/* ---------------------------------------------------------------------------
+   UI: cards, stats, buttons
+--------------------------------------------------------------------------- */
+const cardEls = {};
+function buildCards(){
+  const mk = key => {
+    const c = CATS[key];
+    const cv = el('canvas'); cv.width = 88; cv.height = 88;
+    const count = el('div', {class:'count', text:'0'});
+    const name = el('div', {class:'name'}, el('span', {class:'swatch', style:`background:${c.color}`}), c.label);
+    const card = el('div', {class:'card', 'data-cat':key}, cv, el('div', {class:'lbl'}, name), count);
+    cardEls[key] = {card, cv, count, n:0, pulse:-1};
+    return card;
+  };
+  const L = $('colLeft'), R = $('colRight');
+  for (const k of CAT_KEYS) if (CATS[k].group === 'photo') L.append(mk(k));
+  for (const k of CAT_KEYS) if (CATS[k].group === 'video') R.append(mk(k));
+  R.append(el('h2', {class:'gap', text:'Cleanup'}));
+  for (const k of CAT_KEYS) if (CATS[k].group === 'cleanup') R.append(mk(k));
+}
+function resetCards(){
+  for (const k of CAT_KEYS){ const c = cardEls[k]; c.n = 0; c.count.textContent = '0';
+    c.cv.getContext('2d').clearRect(0,0,88,88); c.card.style.transform = ''; c.pulse = -1; }
+}
+function setStats(){
+  const it = S.items;
+  $('stTotal').textContent  = it.length;
+  $('stPhotos').textContent = it.filter(i => i.kind === 'photo').length;
+  $('stVideos').textContent = it.filter(i => i.kind === 'video').length;
+  $('stDups').textContent   = it.filter(i => i.cat === 'dup').length;
+}
+function setTitle(name){ $('folderName').textContent = name || 'photos'; }  // textContent: folder names are untrusted
+function showOverlay(which){ for (const id of ['ovEmpty','ovScan','ovDone']) $(id).hidden = id !== which; }
+function updateButtons(){
+  const animating = !!sortRun, scanning = !!S.scanToken, busy = S.busy;
+  $('btnChoose').disabled = !HAS_PICKER || busy || animating;
+  $('btnDemo').disabled   = busy || animating;
+  $('btnSort').disabled   = !S.items.length || busy || animating || scanning;
+  $('btnReplay').disabled = !S.items.length || busy || animating || scanning;
+  $('btnUndo').disabled   = !(S.lastRun && S.lastRun.log.ops.length) || busy || animating || scanning;
+}
+
+/* ---------------------------------------------------------------------------
+   Thumbnails & classification
+--------------------------------------------------------------------------- */
+function makeThumb(src, sw, sh){
+  const s = 160 / Math.max(sw, sh);
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(sw*s)); c.height = Math.max(1, Math.round(sh*s));
+  c.getContext('2d').drawImage(src, 0, 0, c.width, c.height);
+  return c;
+}
+const statCanvas = document.createElement('canvas'); statCanvas.width = statCanvas.height = 16;
+const statCtx = statCanvas.getContext('2d', {willReadFrequently:true});
+function sampleStats(src){
+  statCtx.clearRect(0,0,16,16);
+  statCtx.drawImage(src, 0, 0, 16, 16);
+  const d = statCtx.getImageData(0,0,16,16).data;
+  let r=0,g=0,b=0; for (let i=0;i<d.length;i+=4){ r+=d[i]; g+=d[i+1]; b+=d[i+2]; }
+  const n = d.length/4*255; r/=n; g/=n; b/=n;
+  return {r, g, b, lum: 0.2126*r + 0.7152*g + 0.0722*b};
+}
+function isScreenSize(w, h){ return SCREEN_SIZES.some(([a,b]) => (w===a&&h===b) || (w===b&&h===a)); }
+function classifyPhoto(w, h, ext, st){
+  if (ext === 'png' || isScreenSize(w, h)) return 'screenshots';
+  if (st.lum < 0.22) return 'night';
+  if (st.r > st.g && st.g > st.b && st.r - st.b > 0.2 && st.lum > 0.3) return 'golden';
+  if (st.b > st.r + 0.06 && st.b >= st.g - 0.03) return 'sky';
+  if (h > w * 1.15) return 'portrait';
+  return 'everyday';
+}
+function videoCat(d){ if (!isFinite(d)) return 'broll'; return d < 10 ? 'quick' : d <= 60 ? 'broll' : 'long'; }
+function placeholderThumb(label, bg = '#cfcac2', w = 160, h = 120){
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d'); x.fillStyle = bg; x.fillRect(0,0,w,h);
+  x.fillStyle = 'rgba(255,255,255,.9)'; x.font = '600 22px -apple-system,Helvetica,Arial,sans-serif';
+  x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(String(label).slice(0,6).toUpperCase(), w/2, h/2);
+  return c;
+}
+function videoBadge(c, dur){
+  const x = c.getContext('2d');
+  x.fillStyle = 'rgba(0,0,0,.35)'; x.beginPath(); x.arc(c.width/2, c.height/2, 18, 0, Math.PI*2); x.fill();
+  x.fillStyle = '#fff'; x.beginPath(); x.moveTo(c.width/2-6, c.height/2-9); x.lineTo(c.width/2+9, c.height/2); x.lineTo(c.width/2-6, c.height/2+9); x.fill();
+  if (isFinite(dur)){ x.font = '600 13px -apple-system,Helvetica,Arial,sans-serif'; x.textAlign = 'right';
+    const m = Math.floor(dur/60), s = Math.round(dur%60);
+    x.fillText(`${m}:${String(s).padStart(2,'0')}`, c.width-6, c.height-8); }
+}
+
+// Probe a video for its duration (and a frame, if a thumbnail is wanted). Always revokes its URL.
+function probeVideo(file, wantThumb){
+  return new Promise(resolve => {
+    const url = URL.createObjectURL(file);
+    const v = document.createElement('video');
+    v.muted = true; v.preload = 'metadata'; v.playsInline = true;
+    let dur = NaN, done = false;
+    const finish = thumb => {
+      if (done) return; done = true; clearTimeout(timer);
+      v.removeAttribute('src'); try { v.load(); } catch {}
+      URL.revokeObjectURL(url);
+      resolve({duration: dur, thumb: thumb || null});
+    };
+    const timer = setTimeout(() => finish(null), 10000);
+    v.onerror = () => finish(null);
+    v.onloadedmetadata = () => {
+      dur = v.duration;
+      if (!wantThumb || !v.videoWidth){ finish(null); return; }
+      v.onseeked = () => { let c = null; try { c = makeThumb(v, v.videoWidth, v.videoHeight); } catch {} finish(c); };
+      try { v.currentTime = Math.min(1, (isFinite(dur) ? dur : 2) / 2); } catch { finish(null); }
+    };
+    v.src = url;
+  });
+}
+
+// Analyse one file. Never throws: anything unreadable becomes a sensible fallback.
+async function analyse(item, wantThumb){
+  const ext = extOf(item.name);
+  let file;
+  try { file = await item.handle.getFile(); }
+  catch { item.kind = 'other'; item.cat = 'docs'; item.note = 'could not be read'; return; }
+  item.size = file.size; item.lastModified = file.lastModified;
+  const type = file.type || '';
+  if (IMAGE_EXT.has(ext) || type.startsWith('image/')){
+    item.kind = 'photo';
+    try {
+      const bmp = await createImageBitmap(file);
+      try {
+        item.w = bmp.width; item.h = bmp.height;
+        item.cat = classifyPhoto(bmp.width, bmp.height, ext, sampleStats(bmp));
+        if (wantThumb) item.thumb = makeThumb(bmp, bmp.width, bmp.height);
+      } finally { bmp.close(); }
+    } catch {
+      // HEIC/RAW/TIFF etc. that Chrome can't decode: Everyday shots + grey placeholder.
+      item.cat = 'everyday'; item.note = `no preview (${ext.toUpperCase() || 'image'})`;
+      if (wantThumb) item.thumb = placeholderThumb(ext || 'img');
+    }
+  } else if (VIDEO_EXT.has(ext) || type.startsWith('video/')){
+    item.kind = 'video';
+    const r = await probeVideo(file, wantThumb);
+    item.duration = r.duration;
+    item.cat = videoCat(r.duration);
+    if (!isFinite(r.duration)) item.note = 'unknown length';
+    if (wantThumb){ item.thumb = r.thumb || placeholderThumb(ext || 'vid', '#5b5650'); videoBadge(item.thumb, r.duration); }
+  } else {
+    item.kind = 'other'; item.cat = 'docs';
+    if (wantThumb) item.thumb = placeholderThumb(ext || 'file', '#c7b98f');
+  }
+}
+
+// Duplicates: group by size, SHA-256 only same-size files, pick a keeper by name.
+const DUP_SUFFIX = /( \(\d+\)| copy( \d+)?|-copy|_copy)$/i;
+function pickKeeper(group){
+  return [...group].sort((a,b) => {
+    const sa = DUP_SUFFIX.test(splitName(a.name)[0]) ? 1 : 0, sb = DUP_SUFFIX.test(splitName(b.name)[0]) ? 1 : 0;
+    return sa - sb || a.name.length - b.name.length || a.name.localeCompare(b.name);
+  })[0];
+}
+async function findDuplicates(items, token, onProgress){
+  const bySize = new Map();
+  for (const it of items) if (it.size > 0){ const g = bySize.get(it.size) || []; g.push(it); bySize.set(it.size, g); }
+  const toHash = [...bySize.values()].filter(g => g.length > 1).flat();
+  let done = 0;
+  const byHash = new Map();
+  for (const it of toHash){
+    if (token.cancelled) return;
+    onProgress(++done, toHash.length);
+    if (it.size > MAX_HASH_BYTES){ it.note = 'too large to check for duplicates'; continue; }
+    try {
+      const buf = await (await it.handle.getFile()).arrayBuffer();
+      const h = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', buf)), x => x.toString(16).padStart(2,'0')).join('');
+      it.hash = h;
+      const g = byHash.get(h) || []; g.push(it); byHash.set(h, g);
+    } catch { it.note = 'could not check for duplicates'; }
+  }
+  markDuplicates([...byHash.values()]);
+}
+function markDuplicates(groups){
+  for (const g of groups){
+    if (g.length < 2) continue;
+    const keeper = pickKeeper(g);
+    for (const it of g) if (it !== keeper){ it.cat = 'dup'; it.note = `duplicate of ${keeper.name}`; }
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Folder choice & safety checks (rules 1 & 2)
+--------------------------------------------------------------------------- */
+async function listTopLevel(dir){
+  // Only the folder's direct children. Subfolders are listed by name but never opened.
+  const files = [], dirs = [];
+  for await (const [name, h] of dir.entries()) (h.kind === 'file' ? files : dirs).push({name, handle:h});
+  return {files, dirs};
+}
+function checkFolderSafety(name, listing){
+  const lower = name.toLowerCase();
+  const dirNames = new Set(listing.dirs.map(d => d.name.toLowerCase()));
+  const fileNames = new Set(listing.files.map(f => f.name.toLowerCase()));
+  const refuse = msg => ({ok:false, level:'refuse', message:msg});
+  if (/\.(photoslibrary|photolibrary|aplibrary|migratedphotolibrary)$/i.test(name) || /^iphoto library/i.test(name))
+    return refuse('This is a Photos/iPhoto library. Changing files inside it can corrupt the library, so Photo Sorter will not open it. Export your photos to a normal folder first (Photos → File → Export).');
+  const libInner = ['database','originals','resources','masters','private'];
+  if (libInner.includes(lower) || libInner.some(d => dirNames.has(d)) || fileNames.has('photos.sqlite') || fileNames.has('albumdata.xml'))
+    return refuse('This folder looks like part of a Photos/iPhoto library. Photo Sorter will not touch it. Export your photos to a normal folder first (Photos → File → Export).');
+  const isHome = dirNames.has('library') && (dirNames.has('desktop') || dirNames.has('documents'));
+  const hasLibraryInside = listing.dirs.some(d => /\.(photoslibrary|photolibrary|aplibrary)$/i.test(d.name));
+  if (['pictures','desktop','documents','downloads'].includes(lower) || isHome || hasLibraryInside)
+    return {ok:false, level:'broad', message:`"${name}" is a broad system folder. Pick a dedicated folder of exported photos instead. (Demo still works.)`};
+  return {ok:true};
+}
+
+async function chooseFolder(){
+  if (!HAS_PICKER) return;
+  let handle;
+  try {
+    // Read-only first. startIn 'desktop' (not 'pictures') so the picker doesn't open next to the Photos Library.
+    handle = await window.showDirectoryPicker({id:'photo-sorter', mode:'read', startIn:'desktop'});
+  } catch (e) {
+    if (e && e.name === 'AbortError') return;
+    showMessage('Could not open folder', [String(e && e.message || e)]); return;
+  }
+  await openFolder(handle);
+}
+
+async function openFolder(handle){
+  stopEverything();
+  banner(null);
+  let listing;
+  try { listing = await listTopLevel(handle); }
+  catch (e){ showMessage('Could not read folder', [String(e && e.message || e)]); return; }
+  const safety = checkFolderSafety(handle.name, listing);
+  if (!safety.ok){
+    resetToEmpty();
+    banner(safety.message, 'warn');
+    showMessage(safety.level === 'refuse' ? 'This folder is protected' : 'Pick a smaller folder', [safety.message]);
+    return;
+  }
+  S.source = 'folder'; S.root = handle; S.organised = false; S.lastRun = null;
+  setTitle(handle.name);
+  $('subtitle').textContent = 'Read-only until you choose Copy or Move.';
+  await detectPreviousRun(handle, listing);
+  const files = listing.files.filter(f => !isIgnored(f.name));
+  await scanFiles(files);
+}
+
+// Rule 5: if an earlier run's log exists (and wasn't undone), offer to undo it.
+async function detectPreviousRun(root, listing){
+  const undone = new Set();
+  for (const f of listing.files){ const m = UNDO_RE.exec(f.name); if (m) undone.add(m[1]); }
+  const logs = listing.files.filter(f => { const m = LOG_RE.exec(f.name); return m && !undone.has(m[1]); })
+                            .sort((a,b) => b.name.localeCompare(a.name));
+  for (const f of logs){
+    try {
+      const log = sanitiseLog(JSON.parse(await (await f.handle.getFile()).text()));
+      if (!log || !log.ops.length) continue;
+      S.lastRun = {root, log, logName:f.name};
+      const when = new Date(log.startedAt).toLocaleString();
+      banner(`A previous Photo Sorter run (${log.mode}, ${log.ops.length} files, ${when}) can be undone.`, 'info',
+             'Undo previous run', () => undoRun());
+      return;
+    } catch { /* unreadable log: ignore */ }
+  }
+}
+// Logs on disk are user-editable, so only trust well-formed entries that point into our own category folders.
+function sanitiseLog(raw){
+  if (!raw || raw.app !== 'Photo Sorter' || !Array.isArray(raw.ops) || isNaN(Date.parse(raw.startedAt))) return null;
+  const okName = s => typeof s === 'string' && s && !/[\/\\]/.test(s) && s !== '.' && s !== '..';
+  const ops = raw.ops.filter(o => o && (o.op === 'copy' || o.op === 'move') && FOLDER_NAMES.has(o.folder) &&
+                                  okName(o.original) && okName(o.newName) && Number.isFinite(o.size));
+  const createdFolders = Array.isArray(raw.createdFolders) ? raw.createdFolders.filter(n => FOLDER_NAMES.has(n)) : [];
+  return {...raw, ops, createdFolders, mode: raw.mode === 'move' ? 'move' : 'copy'};
+}
+
+/* ---------------------------------------------------------------------------
+   Scanning
+--------------------------------------------------------------------------- */
+async function scanFiles(files){
+  const token = {cancelled:false}; S.scanToken = token;
+  S.items = files.map(f => ({name:f.name, handle:f.handle, size:0, kind:'other', cat:'docs', thumb:null, note:''}));
+  clearPile(); resetCards(); setStats(); updateButtons();
+  if (!S.items.length){
+    S.scanToken = null; updateButtons(); showOverlay('ovDone');
+    $('doneText').textContent = 'No files directly in this folder.';
+    $('doneSub').textContent = 'Photo Sorter only sorts files that sit directly in the chosen folder.';
+    return;
+  }
+  showOverlay('ovScan');
+  const M = S.items.length, step = Math.ceil(M / MAX_SPRITES);
+  let done = 0;
+  const progress = (txt, n, of) => { $('scanText').textContent = txt; $('scanBar').style.transform = `scaleX(${of ? n/of : 0})`; $('scanBar').style.width = '100%'; };
+  progress(`Scanning 0 of ${M} files…`, 0, M);
+  $('scanSub').textContent = 'Reading thumbnails, colours and video lengths. Nothing is changed.';
+  let next = 0;
+  const worker = async () => {
+    while (next < M && !token.cancelled){
+      const i = next++;
+      try { await analyse(S.items[i], i % step === 0); }
+      catch { const it = S.items[i]; it.kind = 'other'; it.cat = 'docs'; it.note = 'could not be read'; }
+      done++; progress(`Scanning ${done} of ${M} files…`, done, M);
+    }
+  };
+  await Promise.all(Array.from({length:Math.min(SCAN_CONCURRENCY, M)}, worker));
+  if (token.cancelled) return;
+  await findDuplicates(S.items, token, (n, of) => progress(`Checking duplicates ${n} of ${of}…`, n, of));
+  if (token.cancelled) return;
+  S.scanToken = null;
+  readyPile();
+}
+function cancelScan(){
+  if (S.scanToken) S.scanToken.cancelled = true;
+  S.scanToken = null; resetToEmpty(); toast('Scan cancelled. Nothing was changed.');
+}
+
+/* ---------------------------------------------------------------------------
+   Demo (never requests a folder, never writes)
+--------------------------------------------------------------------------- */
+function demoCanvas(w, h, stops, draw){
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d'); const g = x.createLinearGradient(0,0,0,h);
+  stops.forEach((s,i) => g.addColorStop(i/(stops.length-1), s)); x.fillStyle = g; x.fillRect(0,0,w,h);
+  if (draw) draw(x, w, h); return c;
+}
+const rnd = (a,b) => a + Math.random()*(b-a);
+function runDemo(){
+  stopEverything(); banner(null);
+  S.source = 'demo'; S.root = null; S.organised = false; S.lastRun = null;
+  setTitle('Demo'); $('subtitle').textContent = 'Demo mode: fake photos, nothing is read or written.';
+  const items = []; let n = 1;
+  const add = (kind, ext, canvas, fakeW, fakeH, extra = {}) => {
+    const name = `IMG_${String(n++).padStart(4,'0')}.${ext}`;
+    const st = sampleStats(canvas);
+    const it = {name, kind, thumb:canvas, size:Math.round(rnd(1.5e6, 6e6)), note:'', ...extra};
+    if (kind === 'photo') it.cat = classifyPhoto(fakeW, fakeH, ext, st);
+    items.push(it); return it;
+  };
+  const kinds = [
+    ['golden', 22, () => demoCanvas(160,120,['#f7c35f','#e8803a','#b8502e'], (x,w,h)=>{x.fillStyle='#fff3c4';x.beginPath();x.arc(w*rnd(.3,.7),h*.6,rnd(10,20),0,7);x.fill();}), 4032,3024],
+    ['sky', 22, () => demoCanvas(160,120,['#9fd3f5','#5ea2dd','#2f6db3'], (x,w,h)=>{x.fillStyle='#1f4f8a';x.fillRect(0,h*rnd(.55,.75),w,h);}), 4032,3024],
+    ['night', 20, () => demoCanvas(160,120,['#07091a','#1a1838','#2a2350'], (x,w,h)=>{x.fillStyle='#fff';for(let i=0;i<14;i++)x.fillRect(rnd(0,w),rnd(0,h*.6),1.5,1.5);}), 4032,3024],
+    ['everyday', 24, () => demoCanvas(160,120,['#b8c4a6','#8fa37f','#6f8a6a'], (x,w,h)=>{x.fillStyle='#6b6258';x.fillRect(w*rnd(.1,.6),h*.4,rnd(20,50),h*.6);}), 4032,3024],
+    ['portrait', 18, () => demoCanvas(120,160,['#d4cfc8','#c4beb6','#b6b0a8'], (x,w,h)=>{x.fillStyle='#9c8f84';x.beginPath();x.arc(w/2,h*.4,22,0,7);x.fill();x.fillRect(w*.25,h*.6,w*.5,h*.4);}), 3024,4032],
+  ];
+  for (const [, count, make, w, h] of kinds) for (let i=0;i<count;i++) add('photo','jpg', make(), w, h);
+  for (let i=0;i<14;i++) add('photo','png', demoCanvas(74,160,['#f4f5f7','#ffffff'], (x,w,h)=>{x.fillStyle='#d8dce3';x.fillRect(0,0,w,14);for(let k=0;k<6;k++){x.fillStyle=k%2?'#e9ecf1':'#cfd6e2';x.fillRect(6,22+k*20,w-12,14);}}), 1170, 2532);
+  for (let i=0;i<20;i++){
+    const d = [rnd(2,9.5), rnd(12,58), rnd(65,400)][i%3];
+    const c = demoCanvas(160,90,['#4a4758','#2e2c38']);
+    videoBadge(c, d);
+    add('video','mov', c, 1920, 1080, {duration:d, cat:videoCat(d)});
+  }
+  for (const ext of ['pdf','txt','zip','docx','csv']) add('other', ext, placeholderThumb(ext,'#c7b98f'), 0, 0, {cat:'docs'});
+  // A few duplicates of existing photos.
+  const groups = [];
+  for (const idx of [3, 17, 29, 44, 61, 88]){
+    const orig = items[idx];
+    const [b,e] = splitName(orig.name);
+    const thumb = document.createElement('canvas'); thumb.width = orig.thumb.width; thumb.height = orig.thumb.height;
+    thumb.getContext('2d').drawImage(orig.thumb, 0, 0);
+    const copy = {...orig, thumb, name:`${b} (1)${e}`};
+    items.push(copy); groups.push([orig, copy]);
+  }
+  markDuplicates(groups);
+  S.items = items;
+  readyPile();
+}
+
+/* ---------------------------------------------------------------------------
+   Pile + sort animation (requestAnimationFrame + CSS transforms only;
+   purely visual — it never touches the file system)
+--------------------------------------------------------------------------- */
+const GOLDEN = Math.PI * (3 - Math.sqrt(5));
+const TILT = 0.78;              // vertical squash = tilted pile
+const SPIN = (Math.PI*2) / 70000; // one turn every 70 s
+let spin = 0, rafId = 0, lastT = 0;
+let pile = [];                  // sprites waiting in the pile
+let sortRun = null;
+
+function clearPile(){
+  $('fly').replaceChildren(); pile = []; sortRun = null; $('hint').hidden = true;
+}
+function readyPile(){
+  showOverlay(null);
+  setStats(); resetCards(); buildPile(); updateButtons();
+  $('hint').hidden = false;
+}
+function spriteItems(){
+  const withThumb = S.items.filter(i => i.thumb);
+  if (withThumb.length <= MAX_SPRITES) return withThumb;
+  const step = withThumb.length / MAX_SPRITES;
+  return Array.from({length:MAX_SPRITES}, (_, k) => withThumb[Math.floor(k*step)]);
+}
+function buildPile(){
+  clearPile();
+  const its = spriteItems();
+  const N = its.length, pw = N > 180 ? 46 : 56;
+  const fly = $('fly');
+  its.forEach((it, i) => {
+    const node = el('div', {class:'pol'}); node.style.setProperty('--pw', pw + 'px');
+    node.append(it.thumb);
+    node.style.zIndex = String(N - i);
+    fly.append(node);
+    pile.push({it, el:node, i, theta: i*GOLDEN, rot: rnd(-14,14), r: Math.sqrt(i + 0.5)});
+  });
+  pile.rmax = Math.sqrt(N + 0.5);
+  positionPile();
+  if (!rafId) rafId = requestAnimationFrame(loop);
+}
+function stageGeom(){
+  const r = $('stage').getBoundingClientRect();
+  return {cx: r.left + r.width/2, cy: r.top + r.height/2 - 8, R: Math.max(40, Math.min(r.width, r.height/TILT)/2 - 50), visible: r.bottom > 0 && r.top < innerHeight};
+}
+function pilePos(sp, g){
+  const rr = (sp.r / (pile.rmax || 1)) * g.R;
+  const a = sp.theta + spin;
+  return {x: g.cx + rr*Math.cos(a), y: g.cy + rr*Math.sin(a)*TILT, rot: sp.rot + spin*57.2958};
+}
+function positionPile(){
+  const g = stageGeom();
+  for (const sp of pile){ if (sp.flying) continue; const p = pilePos(sp, g);
+    sp.el.style.transform = `translate(${p.x}px,${p.y}px) translate(-50%,-50%) rotate(${p.rot}deg)`; }
+}
+
+function sortAction(){
+  if (!S.items.length || sortRun || S.busy || S.scanToken) return;
+  if (!pile.length || pile.every(p => p.done)) { replay(); return; }
+  startSort();
+}
+function replay(){
+  if (!S.items.length || sortRun || S.busy || S.scanToken) return;
+  showOverlay(null); resetCards(); buildPile(); $('hint').hidden = false;
+  setTimeout(startSort, 450);
+}
+function startSort(){
+  if (sortRun) return;
+  $('hint').hidden = true;
+  resetCards();
+  const spriteOf = new Map(pile.map(sp => [sp.it, sp]));
+  // Shuffle so categories interleave.
+  const order = S.items.map((_, i) => i);
+  for (let i = order.length-1; i > 0; i--){ const j = Math.floor(Math.random()*(i+1)); [order[i], order[j]] = [order[j], order[i]]; }
+  const N = order.length, LAUNCH = 4800;
+  const sched = order.map((idx, k) => ({
+    it: S.items[idx], sp: spriteOf.get(S.items[idx]) || null,
+    launch: LAUNCH * Math.sqrt(k / N),           // sqrt: big gaps first, then faster and faster
+    dur: 950 - 520 * (k / N),
+  }));
+  sortRun = {t0: performance.now(), sched, next: 0, active: []};
+  updateButtons();
+}
+const bez = (a, c, b, t) => (1-t)*(1-t)*a + 2*(1-t)*t*c + t*t*b;
+const ease = t => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2;
+function arrive(e, now){
+  const c = cardEls[e.it.cat]; c.n++; c.count.textContent = String(c.n); c.pulse = now;
+  if (e.sp){
+    const x = c.cv.getContext('2d'), t = e.it.thumb, s = Math.max(88/t.width, 88/t.height);
+    x.drawImage(t, (88 - t.width*s)/2, (88 - t.height*s)/2, t.width*s, t.height*s);
+    e.sp.el.remove(); e.sp.done = true;
+  }
+}
+function loop(t){
+  rafId = requestAnimationFrame(loop);
+  const dt = lastT ? Math.min(64, t - lastT) : 16; lastT = t;
+  spin += dt * SPIN;
+  positionPile();
+  if (sortRun){
+    const R = sortRun, el2 = t - R.t0;
+    while (R.next < R.sched.length && R.sched[R.next].launch <= el2){
+      const e = R.sched[R.next++];
+      if (e.sp){ const p = pilePos(e.sp, stageGeom()); e.sx = p.x; e.sy = p.y; e.rot = p.rot; e.sp.flying = true; e.sp.el.style.zIndex = '1000'; }
+      R.active.push(e);
+    }
+    const targets = {};
+    R.active = R.active.filter(e => {
+      const p = Math.min(1, (el2 - e.launch) / e.dur);
+      if (e.sp){
+        let tg = targets[e.it.cat];
+        if (!tg){ const r = cardEls[e.it.cat].cv.getBoundingClientRect(); tg = targets[e.it.cat] = {x:r.left + r.width/2, y:r.top + r.height/2}; }
+        const k = ease(p), dist = Math.hypot(tg.x - e.sx, tg.y - e.sy);
+        const cx = (e.sx + tg.x)/2, cy = Math.min(e.sy, tg.y) - 60 - dist*0.25;
+        const x = bez(e.sx, cx, tg.x, k), y = bez(e.sy, cy, tg.y, k);
+        e.sp.el.style.transform = `translate(${x}px,${y}px) translate(-50%,-50%) rotate(${e.rot*(1-k)}deg) scale(${1 - 0.6*k})`;
+      }
+      if (p >= 1){ arrive(e, t); return false; }
+      return true;
+    });
+    if (R.next >= R.sched.length && !R.active.length){ sortRun = null; onSortDone(); }
+  }
+  for (const k of CAT_KEYS){
+    const c = cardEls[k]; if (c.pulse < 0) continue;
+    const p = (t - c.pulse) / 260;
+    if (p >= 1){ c.card.style.transform = ''; c.pulse = -1; }
+    else c.card.style.transform = `scale(${1 + 0.05*Math.sin(p*Math.PI)})`;
+  }
+  if (!pile.some(sp => !sp.done) && !sortRun){ cancelAnimationFrame(rafId); rafId = 0; lastT = 0; }
+}
+function onSortDone(){
+  updateButtons();
+  showOverlay('ovDone');
+  if (S.source === 'demo'){
+    $('doneText').textContent = `Sorted ${S.items.length} demo files.`;
+    $('doneSub').textContent = 'Demo only: nothing was read or written. Press R to replay.';
+    return;
+  }
+  if (S.organised){
+    $('doneText').textContent = 'Replay finished.';
+    $('doneSub').textContent = 'These files are already organised. Use Undo to put them back.';
+    return;
+  }
+  $('doneText').textContent = `Ready to organise ${S.items.length} files.`;
+  $('doneSub').textContent = 'Nothing has been changed yet.';
+  openPlanDialog();
+}
+
+/* ---------------------------------------------------------------------------
+   Plan dialog (rule 3)
+--------------------------------------------------------------------------- */
+function openPlanDialog(){
+  const items = S.items;
+  $('planTitle').textContent = `Organise ${items.length} files?`;
+  $('planIntro').textContent = `Each file goes into a subfolder inside "${S.root.name}":`;
+  const counts = {}; for (const it of items) counts[it.cat] = (counts[it.cat] || 0) + 1;
+  const chips = $('planChips'); chips.replaceChildren();
+  for (const k of CAT_KEYS) if (counts[k]) chips.append(el('span', {class:'chip', text:`${CATS[k].folder}: ${counts[k]}`}));
+  const list = $('planList'); list.replaceChildren();
+  const frag = document.createDocumentFragment();
+  for (const it of items){
+    frag.append(el('div', null, el('span', {class:'f', text:it.name}), el('span', {class:'to', text:'→ ' + CATS[it.cat].folder}),
+                       it.note ? el('span', {class:'note', text:it.note}) : null));
+  }
+  list.append(frag);
+  const total = items.reduce((s, it) => s + (it.size || 0), 0);
+  $('planSize').textContent = `Copy will use ${fmtBytes(total)} more disk space. Copies get today's date in Finder (the date stored inside each photo is kept). Move keeps the original file date.`;
+  const mv = $('planMoveBtn');
+  mv.disabled = !SUPPORTS_MOVE;
+  $('planMove').textContent = SUPPORTS_MOVE
+    ? 'Move: files are moved into subfolders here; Undo puts them back.'
+    : 'Move is not available in this browser version (it has no safe built-in move), so only Copy is offered.';
+  const d = $('dlgPlan');
+  $('planCancel').onclick = () => d.close();
+  $('planCopyBtn').onclick = () => { d.close(); runOrganise('copy'); };
+  mv.onclick = () => { d.close(); if (SUPPORTS_MOVE) runOrganise('move'); };
+  d.showModal(); $('planCopyBtn').focus();
+}
+
+/* ---------------------------------------------------------------------------
+   File operations (rule 4) — the only code that writes
+--------------------------------------------------------------------------- */
+async function ensureWritePermission(h){
+  if (typeof h.queryPermission !== 'function') return true;
+  const o = {mode:'readwrite'};
+  if (await h.queryPermission(o) === 'granted') return true;
+  return (await h.requestPermission(o)) === 'granted';
+}
+// True if anything (file OR folder) already uses this name.
+async function nameTaken(dir, name){
+  try { await dir.getFileHandle(name); return true; }
+  catch (e){ return !(e && e.name === 'NotFoundError'); }  // TypeMismatchError = a folder has that name
+}
+async function freeName(dir, name){
+  if (!await nameTaken(dir, name)) return name;
+  const [b, e] = splitName(name);
+  for (let n = 1; n < 10000; n++){ const c = `${b} (${n})${e}`; if (!await nameTaken(dir, c)) return c; }
+  throw new Error(`No free name for ${name}`);
+}
+// Get (or create) a category folder, remembering whether this app created it.
+async function ensureFolder(root, name, log, cache){
+  if (cache.has(name)) return cache.get(name);
+  let existed = true;
+  try { await root.getDirectoryHandle(name); }
+  catch (e){
+    if (e && e.name === 'NotFoundError') existed = false;
+    else if (e && e.name === 'TypeMismatchError') throw new Error(`A file named "${name}" is in the way of the folder Photo Sorter needs.`);
+    else throw e;
+  }
+  const d = await root.getDirectoryHandle(name, {create:true});
+  if (!existed) log.createdFolders.push(name);
+  cache.set(name, d); return d;
+}
+// Copy src into dir/newName. newName was checked free immediately before this call.
+async function copyInto(src, dir, newName){
+  const fh = await dir.getFileHandle(newName, {create:true});
+  // If something appeared under this name between the check and now, stop rather than overwrite it.
+  if ((await fh.getFile()).size !== 0) throw new Error(`"${newName}" appeared in the destination just now; stopped to avoid overwriting it.`);
+  try {
+    const w = await fh.createWritable();       // safe: this file was just created by this run and is empty
+    await src.stream().pipeTo(w);              // pipeTo closes (or aborts) the writable
+  } catch (e) {
+    await dir.removeEntry(newName).catch(() => {}); // remove only our own half-written copy
+    throw e;
+  }
+  const out = await fh.getFile();
+  if (out.size !== src.size){
+    await dir.removeEntry(newName).catch(() => {}); // our own incomplete copy
+    throw new Error(`Copy of "${src.name}" came out the wrong size (${out.size} vs ${src.size}); removed the bad copy, original untouched.`);
+  }
+}
+// Log writer: the log file is created by this run, so rewriting it is not an overwrite of user data.
+function makeLogWriter(handle, log){
+  let timer = 0, chain = Promise.resolve();
+  const w = {failed:null};
+  const write = () => (chain = chain.then(async () => {
+    const wr = await handle.createWritable();
+    await wr.write(JSON.stringify(log, null, 1)); await wr.close();
+  }).catch(e => { w.failed = e; }));
+  w.schedule = () => { if (!timer) timer = setTimeout(() => { timer = 0; write(); }, 300); };
+  w.flushNow = async () => { if (timer){ clearTimeout(timer); timer = 0; } await write(); if (w.failed) throw w.failed; };
+  return w;
+}
+
+let stopRequested = false;
+function progressDialog(title){
+  const d = $('dlgProgress'); $('progTitle').textContent = title; $('progBar').style.width = '100%';
+  $('progBar').style.transform = 'scaleX(0)'; $('progFile').textContent = '';
+  stopRequested = false; const b = $('progStop'); b.disabled = false; b.textContent = 'Stop';
+  b.onclick = () => { stopRequested = true; b.disabled = true; b.textContent = 'Stopping…'; };
+  d.oncancel = e => e.preventDefault();    // Esc must not hide a running job
+  d.showModal();
+  return {
+    set(n, of, file, verb){ $('progTitle').textContent = `${verb} ${n} of ${of}…`; $('progBar').style.transform = `scaleX(${of ? n/of : 0})`; $('progFile').textContent = file || ''; },
+    close(){ d.close(); },
+  };
+}
+
+async function runOrganise(mode){
+  if (S.busy || S.organised || !S.root) return;
+  if (mode === 'move' && !SUPPORTS_MOVE) return;
+  const root = S.root;
+  if (!await ensureWritePermission(root).catch(() => false)){ toast('Write permission was not granted. Nothing changed.'); return; }
+  S.busy = true; updateButtons();
+  const startedAt = new Date();
+  const log = {app:'Photo Sorter', version:1, folder:root.name, mode, startedAt:startedAt.toISOString(),
+               status:'running', createdFolders:[], ops:[], skipped:[], error:null};
+  let logName, writer, ui;
+  try {
+    logName = await freeName(root, `photo-sorter-log-${stamp(startedAt)}.json`);
+    const logHandle = await root.getFileHandle(logName, {create:true});
+    writer = makeLogWriter(logHandle, log);
+    await writer.flushNow();                       // log exists BEFORE the first file operation
+  } catch (e){
+    S.busy = false; updateButtons();
+    showMessage('Nothing was changed', ['Could not create the log file, so Photo Sorter did not start.', String(e && e.message || e)]);
+    return;
+  }
+  S.lastRun = {root, log, logName};
+  banner(null);
+  ui = progressDialog(mode === 'copy' ? 'Copying…' : 'Moving…');
+  const verb = mode === 'copy' ? 'Copying' : 'Moving';
+  const cache = new Map();
+  let current = null;
+  try {
+    for (let i = 0; i < S.items.length; i++){
+      if (stopRequested){ log.status = 'stopped'; break; }
+      const it = current = S.items[i];
+      ui.set(i + 1, S.items.length, it.name, verb);
+      let src;
+      try { src = await it.handle.getFile(); }
+      catch { log.skipped.push({name:it.name, reason:'no longer in the folder'}); continue; }
+      if (src.size !== it.size || src.lastModified !== it.lastModified){
+        log.skipped.push({name:it.name, reason:'changed since the scan'}); continue;
+      }
+      const folder = CATS[it.cat].folder;
+      const dir = await ensureFolder(root, folder, log, cache);
+      const newName = await freeName(dir, it.name);     // re-checked right before each operation
+      if (mode === 'copy') await copyInto(src, dir, newName);
+      else await it.handle.move(dir, newName);          // real move only; destination name is free
+      log.ops.push({op:mode, original:it.name, folder, newName, size:it.size});
+      writer.schedule();
+      if (writer.failed) throw new Error('The log file could not be updated, so Photo Sorter stopped to keep Undo reliable.');
+    }
+    if (log.status === 'running') log.status = 'complete';
+  } catch (e){
+    log.status = 'error';
+    log.error = {file: current && current.name, message: String(e && e.message || e)};
+  }
+  try { await writer.flushNow(); } catch (e){ log.error = log.error || {file:null, message:'Log write failed: ' + (e && e.message || e)}; }
+  ui.close();
+  S.busy = false; S.organised = log.ops.length > 0; updateButtons();
+  const nf = new Set(log.ops.map(o => o.folder)).size;
+  const did = `${mode === 'copy' ? 'Copied' : 'Moved'} ${log.ops.length} of ${S.items.length} files into ${nf} folder${nf === 1 ? '' : 's'}.`;
+  const skipped = log.skipped.map(s => `${s.name}: ${s.reason}`);
+  $('doneText').textContent = did; $('doneSub').textContent = `Log saved as ${logName}. Undo is available.`;
+  showOverlay('ovDone');
+  if (log.status === 'error'){
+    await showMessage('Stopped because of an error', [did, `Problem with "${log.error.file}": ${log.error.message}`,
+      'Everything done so far is in the log and can be undone.'], skipped);
+  } else if (log.status === 'stopped'){
+    await showMessage('Stopped', [did, 'Everything done so far is in the log and can be undone.'], skipped);
+  } else {
+    await showMessage('Done', [did, `A log was saved as "${logName}". Undo works even after closing this tab.`,
+      ...(skipped.length ? ['These files were skipped:'] : [])], skipped);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Undo (rule 5)
+--------------------------------------------------------------------------- */
+async function undoRun(){
+  const run = S.lastRun;
+  if (!run || S.busy || sortRun) return;
+  const {root, log, logName} = run;
+  if (!await ensureWritePermission(root).catch(() => false)){ toast('Write permission was not granted. Nothing changed.'); return; }
+  S.busy = true; updateButtons(); banner(null);
+  const res = {restored:0, removedCopies:0, renamed:[], skipped:[], foldersRemoved:[], foldersKept:[]};
+  const ui = progressDialog('Undoing…');
+  const ops = [...log.ops].reverse();
+  const runStart = Date.parse(log.startedAt);
+  let i = 0;
+  for (const op of ops){
+    if (stopRequested) { res.skipped.push(`${ops.length - i} files: undo stopped before reaching them`); break; }
+    ui.set(++i, ops.length, op.newName, 'Undoing');
+    const where = `${op.folder}/${op.newName}`;
+    try {
+      let dir, fh, f;
+      try { dir = await root.getDirectoryHandle(op.folder); fh = await dir.getFileHandle(op.newName); f = await fh.getFile(); }
+      catch { res.skipped.push(`${where}: not found (moved, renamed or deleted)`); continue; }
+      if (f.size !== op.size){ res.skipped.push(`${where}: size changed since sorting; left alone`); continue; }
+      if (op.op === 'move'){
+        const target = await freeName(root, op.original);
+        await fh.move(root, target);
+        res.restored++;
+        if (target !== op.original) res.renamed.push(`${op.original} was taken, restored as ${target}`);
+      } else {
+        // Only delete a copy that this run made (written after the run started)
+        // and only while the original is still there with the same size.
+        if (f.lastModified < runStart - 2000){ res.skipped.push(`${where}: older than the run, so not a Photo Sorter copy; kept`); continue; }
+        let orig;
+        try { orig = await (await root.getFileHandle(op.original)).getFile(); }
+        catch { res.skipped.push(`${where}: original ${op.original} is missing, so the copy was kept`); continue; }
+        if (orig.size !== op.size){ res.skipped.push(`${where}: original ${op.original} changed, so the copy was kept`); continue; }
+        await dir.removeEntry(op.newName);
+        res.removedCopies++;
+      }
+    } catch (e){ res.skipped.push(`${where}: ${e && e.message || e}`); }
+  }
+  // Remove only folders this app created, and only if empty (removeEntry on a non-empty folder fails by design).
+  for (const name of log.createdFolders){
+    try {
+      const d = await root.getDirectoryHandle(name);
+      let empty = true; for await (const _ of d.keys()){ empty = false; break; }
+      if (!empty){ res.foldersKept.push(name); continue; }
+      await root.removeEntry(name);
+      res.foldersRemoved.push(name);
+    } catch { res.foldersKept.push(name); }
+  }
+  // Record that this log has been undone, in a NEW file (the old log is never rewritten).
+  const suffix = LOG_RE.exec(logName)[1];
+  try {
+    const mName = await freeName(root, `photo-sorter-undo-${suffix}.json`);
+    const mh = await root.getFileHandle(mName, {create:true});
+    const w = await mh.createWritable();         // safe: file just created by this undo
+    await w.write(JSON.stringify({app:'Photo Sorter', undoneAt:new Date().toISOString(), log:logName, result:res}, null, 1));
+    await w.close();
+  } catch { /* marker is a convenience; failure only means the banner may offer undo again (which would skip everything) */ }
+  ui.close();
+  S.busy = false; S.lastRun = null; S.organised = false; updateButtons();
+  const lines = [];
+  if (res.restored) lines.push(`Moved ${res.restored} files back.`);
+  if (res.removedCopies) lines.push(`Removed ${res.removedCopies} copies made by Photo Sorter (originals untouched).`);
+  if (res.foldersRemoved.length) lines.push(`Removed empty folders: ${res.foldersRemoved.join(', ')}.`);
+  if (res.foldersKept.length) lines.push(`Kept folders that are not empty: ${res.foldersKept.join(', ')}.`);
+  if (!lines.length) lines.push('Nothing needed undoing.');
+  const list = [...res.renamed, ...res.skipped];
+  if (list.length) lines.push('Notes (skipped files were left exactly where they are):');
+  await showMessage('Undo finished', lines, list);
+  await openFolder(root);   // rescan so the view matches the folder
+}
+
+/* ---------------------------------------------------------------------------
+   Reset / wiring
+--------------------------------------------------------------------------- */
+function stopEverything(){
+  if (S.scanToken) S.scanToken.cancelled = true;
+  S.scanToken = null; clearPile();
+}
+function resetToEmpty(){
+  stopEverything(); S.items = []; S.source = null; S.root = null; S.organised = false;
+  setTitle(''); $('subtitle').textContent = 'Works offline. Nothing is uploaded, deleted or overwritten.';
+  resetCards(); setStats(); showOverlay('ovEmpty'); updateButtons();
+}
+
+buildCards();
+resetToEmpty();
+if (!HAS_PICKER) banner('Real sorting needs desktop Chrome or Edge. Demo still works.');
+
+const click = (id, fn) => $(id).addEventListener('click', e => { e.currentTarget.blur(); fn(); });
+click('btnChoose', chooseFolder);
+click('btnDemo', runDemo);
+click('btnReplay', replay);
+click('btnSort', sortAction);
+click('btnUndo', undoRun);
+$('btnCancelScan').addEventListener('click', cancelScan);
+
+document.addEventListener('keydown', e => {
+  if (document.querySelector('dialog[open]')) return;
+  const t = e.target;
+  if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;          // keep Cmd+R reload working
+  if (e.key === ' '){ e.preventDefault(); sortAction(); }
+  else if (e.key === 'r' || e.key === 'R'){ e.preventDefault(); replay(); }
+});
+addEventListener('resize', () => { if (pile.length) positionPile(); });
+
+// Test hook: lets an automated test hand in a sandboxed directory handle instead of the picker.
+// It only opens and scans; writing still requires pressing Copy or Move in the plan dialog.
+window.PhotoSorter = { openFolder };
+</script>
+</body>
+</html>
