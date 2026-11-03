@@ -24,6 +24,9 @@ ANIMATION
   slow then faster, card counters ticking up. Total 5–8 seconds whatever the file count.
 - requestAnimationFrame + CSS transforms only. Show at most ~300 thumbnails in the pile;
   if there are more, the remaining ones count up on the cards without their own sprite.
+- Before the pile appears, run a visible "Scanning N of M files…" phase with a progress
+  bar and a Cancel button (decoding thousands of photos takes minutes; it must not look hung).
+  Decode at most 4 files at a time.
 - Make thumbnails small (about 160px on the long side) using createImageBitmap /
   canvas, and revoke every object URL when it's no longer needed.
 - The animation is ONLY a visualisation. It must never touch the file system.
@@ -38,8 +41,9 @@ CATEGORIES (heuristics; a wrong guess is fine because nothing is ever deleted)
   mark it "unknown length" in the plan.
 - Duplicates: identical bytes. Group files by size first and only SHA-256
   (crypto.subtle.digest) files that share a size. Skip hashing files over 1 GB
-  and say so. In each duplicate group, the copy with the oldest lastModified (tie: shortest
-  name) is the "keeper" and is sorted normally; the others go to the Duplicates folder.
+  and say so. In each duplicate group, the keeper is the file whose name has no
+  " (n)"/"copy" suffix (tie: shortest name, then alphabetical; don't use lastModified,
+  because exported files all share the export time). The keeper is "keeper" and is sorted normally; the others go to the Duplicates folder.
 - Docs & other: anything that isn't a decodable image or video.
 - HEIC/HEIF that Chrome can't decode: classify by extension as Everyday shots and show
   a grey placeholder thumbnail. Never crash on a file that won't decode; wrap each one in
@@ -65,6 +69,9 @@ REAL SORTING: the safety rules below are mandatory
      list of every "file → destination folder" and buttons Copy (default, pre-selected),
      Move, and Cancel. Explain Move in one line: "Files are moved into subfolders
      here; Undo puts them back."
+   - Show the total size to be copied ("Copy will use 14.2 GB more disk space").
+     Explain that copies get a new file date in Finder (the photo's own EXIF date is
+     kept), and Move keeps the original file date.
 4. Never delete, never overwrite
    - Destination subfolders are created inside the chosen folder with
      getDirectoryHandle(name, { create: true }).
@@ -75,10 +82,15 @@ REAL SORTING: the safety rules below are mandatory
    - Copy: stream the source into the new file (file.stream().pipeTo(writable)), then
      re-read the new file and confirm its size matches. If it doesn't match, delete only
      that half-written copy and report the error.
+   - Re-check that the destination name is free immediately before each copy/move,
+     not only when building the plan.
    - Move: use FileSystemFileHandle.move(destDirHandle, newName) only. If move() is not
      available in this browser, disable the Move button and explain why. Do NOT
      emulate move with copy + delete of the original.
    - The app must never call removeEntry() on any file it did not create during this run.
+   - Never pass { recursive: true } to removeEntry(), anywhere. Search the final code
+     for "recursive" and confirm it does not appear.
+   - Record which category folders the app CREATED (vs. already existed) in the log.
    - Process files one at a time, with a progress bar and a Stop button. Stopping
      keeps whatever is already done and still allows Undo.
 5. Log + Undo
@@ -90,7 +102,10 @@ REAL SORTING: the safety rules below are mandatory
        name is taken, use a free "(n)" name and say so);
        copied files → removeEntry() ONLY on the copy the app created, and ONLY after
        confirming the original still exists with the same size.
-     Then remove category subfolders that are now empty (and only if empty).
+     Before moving a file back, confirm it is still at the logged path with the logged size;
+     if not (I renamed, edited or deleted it), skip it and list it as "skipped".
+     Then remove only category subfolders that the app itself created AND that are now
+     empty (removeEntry without recursive fails on non-empty folders; that's intended).
    - On "Choose folder", if a photo-sorter log exists, offer "Undo previous run".
 6. Errors: if any operation fails (permission revoked, disk full, name too long), stop,
    show which file failed, and leave everything already done listed in the log.
@@ -106,14 +121,22 @@ EXTRAS
 
 DELIVERABLE
 - One index.html, commented, with the safety rules above as a comment block at the top.
+  Write the complete file; if it would be too long, say so and split the reply rather
+  than silently dropping features.
+- After the code, give a SAFETY SELF-CHECK table: each numbered rule in REAL SORTING →
+  the function name that implements it. List every call to removeEntry, createWritable
+  and move with one line explaining why it's safe.
 - At the end, give me a short manual test checklist that uses a THROWAWAY test folder
   only (never my real photos) and covers: copy, move, undo after copy, undo after move, name
-  collision, duplicates, a HEIC file, a video, a .txt file, and picking a
+  collision, duplicates, a HEIC file, a video, a .txt file, refresh-then-undo, undo after
+  I manually deleted one sorted file, pressing Stop halfway, and picking a
   .photoslibrary folder (it must refuse).
 ```
 
 ## Using it with iPhone/Mac photos (do this every time)
 
+0. Make sure Time Machine (or another backup) has run recently. This protects you even if
+   every safeguard below fails.
 1. In the Mac Photos app, select the photos and choose **File → Export → Export N Photos…**,
    set Photo Kind to **JPEG**, and export into a new folder, e.g. `~/Desktop/to-sort`.
    (Wait for iCloud originals to download if "Optimize Mac Storage" is on.)

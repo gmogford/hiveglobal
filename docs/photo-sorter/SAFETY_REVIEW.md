@@ -42,3 +42,29 @@ useful there.
 - Keep your Photos library / iCloud as the master copy. The sorted export folder is a
   working copy, so even a worst-case bug can't lose a photo.
 - Category accuracy is a rough heuristic. Expect to drag some files by hand afterwards.
+
+## Premortem: "It's six months later and the Photo Sorter caused a disaster. Why?"
+
+Ranked by likelihood × damage. **Fixed** means `PROMPT.md` was updated to cover it.
+
+| # | Failure story | Likelihood | Damage | Status |
+|---|---|---|---|---|
+| 1 | The generated code quietly skipped a safety rule (long prompt, long file, model ran out of room), and nobody checked. | High | High | **Fixed:** the prompt now asks for a rule-to-function self-check table, an audit of every `removeEntry`/`createWritable`/`move` call, and a full file rather than a truncated one. You still have to read the table. |
+| 2 | You picked the Photos library or `~/Pictures` anyway, and the folder guard had a bug or didn't recognise the layout. | Medium | Severe | Partly fixed. The only real defence is not picking it. Export to `~/Desktop/to-sort` and keep a **Time Machine backup** (step 0 added). |
+| 3 | Undo cleanup called `removeEntry(dir, {recursive:true})` and wiped a category folder that held your own files. | Low–Med | Severe | **Fixed:** `recursive` is banned, and only folders the app created can be removed. |
+| 4 | Undo ran after you'd tidied things by hand: it moved the wrong files back or failed halfway. | Medium | Medium | **Fixed:** Undo checks each file's logged path and size and skips mismatches. |
+| 5 | Name was free when the plan was built but taken when the operation ran (second run, Finder open), so the file got overwritten. | Low | High | **Fixed:** the name is re-checked right before each operation. |
+| 6 | Copy filled the disk on a big video folder, leaving half-written files. | Medium | Low | **Fixed:** the dialog shows the GB total; the size check already removes half-written copies. |
+| 7 | "It froze." Scanning 5,000 photos took minutes with no feedback, so you force-quit mid-run. | High | Low | **Fixed:** visible scan phase with progress and Cancel. Stop/Undo already survive a partial run via the log. |
+| 8 | Finder dates all became "today" after Copy, and date-sorted views were ruined. | High | Low | **Fixed:** explained in the dialog. EXIF dates inside the photo are unaffected, and Move keeps dates. |
+| 9 | The duplicate "keeper" was arbitrary, because every exported file has the same export timestamp. | High | Low | **Fixed:** the keeper is chosen by filename (no " (1)"/"copy" suffix). |
+| 10 | JPEG export lost Live Photo motion and HEIC quality, and you later deleted the library thinking the export was the archive. | Low | Severe | Not fixed in code. Treat the export as a **working copy** and never as a replacement for the library/iCloud. |
+| 11 | Move was unavailable in your Chrome version and a "helpful" rewrite emulated it with copy + delete. | Low | High | Covered: the rule bans emulation, and the self-check table must list every `move`/`removeEntry` call. |
+| 12 | Categories were poor (exported screenshots are JPEG, not PNG; colour heuristics are crude), so you gave up. | High | None | Accepted. Nothing is lost, and it's a fun visual sorter, not a curator. |
+
+### Tripwires before trusting it with real exports
+- Read the SAFETY SELF-CHECK table, then search the HTML for `removeEntry`, `recursive`,
+  `createWritable` and `fetch`. You should see no `recursive` and no `fetch`.
+- Run the full throwaway-folder checklist, including refresh-then-undo and the
+  `.photoslibrary` refusal.
+- Confirm a backup exists before the first real run.
